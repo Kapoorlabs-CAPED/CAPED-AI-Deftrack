@@ -1,0 +1,237 @@
+/*-
+ * #%L
+ * Microtubule tracker.
+ * %%
+ * Copyright (C) 2017 MTrack developers.
+ * %%
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public
+ * License along with this program.  If not, see
+ * <http://www.gnu.org/licenses/gpl-3.0.html>.
+ * #L%
+ */
+package preProcessing;
+
+import java.util.Arrays;
+
+import javax.swing.JProgressBar;
+
+import net.imglib2.Cursor;
+import net.imglib2.IterableInterval;
+import net.imglib2.RandomAccess;
+import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.algorithm.BenchmarkAlgorithm;
+import net.imglib2.algorithm.OutputAlgorithm;
+import net.imglib2.algorithm.gauss3.Gauss3;
+import net.imglib2.algorithm.neighborhood.DiamondShape.NeighborhoodsAccessible;
+import net.imglib2.algorithm.stats.Normalize;
+import net.imglib2.exception.IncompatibleTypeException;
+import net.imglib2.algorithm.neighborhood.Neighborhood;
+import net.imglib2.algorithm.neighborhood.RectangleShape;
+import net.imglib2.img.Img;
+import net.imglib2.img.ImgFactory;
+import net.imglib2.type.NativeType;
+import net.imglib2.type.numeric.RealType;
+import net.imglib2.type.numeric.real.FloatType;
+import net.imglib2.util.Util;
+import net.imglib2.view.IntervalView;
+import net.imglib2.view.Views;
+
+/**
+ * A simple flat field and median filter that operates on 1D, 2D or 3D images.
+ * <p>
+ * For 3D images, the filtering is done only in 2D XY slices. Removes shot noise,
+ * corrects for uneven illumination
+ * 
+ * @author V. Kapoor - 2017, Jean-Yves Tinevez - 2015
+ *
+ * @param <FloatType>
+ *            the type of the source image.
+ */
+public class FlatFieldOnly <T extends RealType<T> & NativeType<T>> extends BenchmarkAlgorithm implements OutputAlgorithm< RandomAccessibleInterval< T >>
+{
+	private static final String BASE_ERROR_MSG = "[FlatField2D] ";
+
+	private final RandomAccessibleInterval< T > source;
+
+	private RandomAccessibleInterval< T > output;
+
+	private final int flatfieldradius;
+	
+	
+	private  JProgressBar jpb;
+
+	/**
+	 * Instantiate a new Flat field correction filter that will operate on the specified
+	 * source.
+	 * 
+	 * @param currentPreprocessedimg
+	 *            the source to operate on.
+	 * @param radius
+	 *            determines the size of the neighborhood. In 2D or 3D, a radius
+	 *            of 1 will generate a 3x3 neighborhood.
+	 */
+	public FlatFieldOnly( final RandomAccessibleInterval<T> source, final int flatfieldradius )
+	{
+		this.source = source;
+		this.flatfieldradius = flatfieldradius;
+	}
+	
+	
+	public FlatFieldOnly( final RandomAccessibleInterval<T> source, final int flatfieldradius, final JProgressBar jpb  )
+	{
+		this.source = source;
+		this.flatfieldradius = flatfieldradius;
+		this.jpb = jpb;
+	}
+
+	@Override
+	public boolean checkInput()
+	{
+		if ( source.numDimensions() > 3 )
+		{
+			errorMessage = BASE_ERROR_MSG + " Can only operate on 1D, 2D or 3D images. Got " + source.numDimensions() + "D.";
+			return false;
+		}
+		
+		return true;
+	}
+
+	@Override
+	public boolean process()
+	{
+		final long start = System.currentTimeMillis();
+
+		final T type = source.randomAccess().get().createVariable();
+		final ImgFactory< T > factory = Util.getArrayOrCellImgFactory( source, type );
+		this.output = factory.create( source, type );
+
+		
+		
+		if ( source.numDimensions() > 2 )
+		{
+			final long nz = source.dimension( 2 );
+			
+			double percent = 0;
+			for ( long z = 0; z < nz; z++ )
+			{
+				
+				percent++;
+				final IntervalView< T > slice = Views.hyperSlice( source, 2, z );
+				final IntervalView< T > outputSlice = Views.hyperSlice( output, 2, z );
+			   
+				if(jpb!=null)
+					scrollbar.Utility.SetProgressBar(jpb, 100 * percent/nz, "Doing Flat field correction, please wait..");
+				
+				processSlice( slice, outputSlice );
+				
+				
+				
+			}
+		}
+		else
+		{
+			processSlice( source, Views.iterable(output) );
+		}
+
+		this.processingTime = System.currentTimeMillis() - start;
+		return true;
+	}
+
+	
+       private void subtract(RandomAccessibleInterval<T> target, RandomAccessibleInterval<T> darkfield){
+		
+		
+		Cursor<T> cursor = Views.iterable(target).localizingCursor();
+		RandomAccess<T> Gaussran = darkfield.randomAccess();
+		double value;
+		while(cursor.hasNext()){
+			
+			cursor.fwd();
+			
+			Gaussran.setPosition(cursor);
+			
+			value = cursor.get().getRealDouble() - Gaussran.get().getRealDouble();
+			cursor.get().setReal(Math.max(value,0));
+			
+			
+		}
+		
+		
+		
+		
+	}
+	
+       /**
+        * 
+        * @param in
+        * 
+        * The randomaccessible interval on which we apply a gaussian filter (big radius =  image dim / n pixels) and then
+        * subtract it from the original image to create a background corrected image
+        * 
+        * @param out
+        * 
+        * Median filter is applied on the background corrected image generated from the previous step and is the pre-processed image to be
+        * used by the Line finders of the MTV tracker
+        * 
+        */
+	private void processSlice( final RandomAccessibleInterval< T > in, final IterableInterval< T > out )
+	{
+		
+		double[] sigma = new double[in.numDimensions()];
+		for (int d = 0; d < in.numDimensions(); ++d) {
+			sigma[d] = (int) Math.round((in.realMax(d) - in.realMin(d)) / flatfieldradius);
+		}
+		
+		RandomAccessibleInterval<T> gaussimg = Utils.copyImage(in);
+		RandomAccessibleInterval<T> correctedgaussimg = Utils.copyImage(in);
+		
+	
+		try {
+			
+			Gauss3.gauss(sigma, Views.extendBorder(gaussimg), gaussimg);
+
+		} catch (IncompatibleTypeException e) {
+
+			e.printStackTrace();
+		}
+		
+		// Subtract the darkfield from the image
+		subtract(correctedgaussimg, gaussimg);
+		
+		
+		final Cursor< T > cursor = out.localizingCursor();
+
+		
+
+		final RandomAccess<T> nra = correctedgaussimg.randomAccess();
+		
+
+		// Fill buffer with median values.
+		while ( cursor.hasNext() )
+		{
+			cursor.fwd();
+			nra.setPosition( cursor );
+			
+		
+			cursor.get().setReal( nra.get().getPowerDouble());
+		}
+		
+	
+	}
+
+	@Override
+	public RandomAccessibleInterval<T> getResult()
+	{
+		return output;
+	}
+}
