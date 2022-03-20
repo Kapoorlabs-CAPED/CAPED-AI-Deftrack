@@ -109,6 +109,7 @@ Under MIT license. See [LICENSE](LICENSE).
 
 ## Authors
 
-- Özge Özgüç
-- Varun Kapoor <randomaccessiblekapoor@gmail.com>
+- Varun Kapoor <randomaccessiblekapoor@gmail.com> (Core tech lead)
+- Özge Özgüç (Contributor)
+
 
